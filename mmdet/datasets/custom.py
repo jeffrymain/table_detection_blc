@@ -238,7 +238,8 @@ class CustomDataset(Dataset):
         if self.proposals is not None:
             results['proposals'] = self.proposals[idx]
         self.pre_pipeline(results)
-        return self.pipeline(results)
+        re = self.pipeline(results)
+        return re
 
     def prepare_test_img(self, idx):
         """Get testing data after pipeline.
@@ -256,7 +257,8 @@ class CustomDataset(Dataset):
         if self.proposals is not None:
             results['proposals'] = self.proposals[idx]
         self.pre_pipeline(results)
-        return self.pipeline(results)
+        re = self.pipeline(results)
+        return re
 
     @classmethod
     def get_classes(cls, classes=None):

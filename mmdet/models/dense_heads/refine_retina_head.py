@@ -11,77 +11,66 @@ import torch
 import numpy as np
 from torch import nn, Tensor, square
 from typing import Optional, List, Dict, Tuple
+from ..builder import HEADS, build_head, build_roi_extractor, build_shared_head
+
+def line2result(ori_lines, lboxes, labels, num_classes):
+    if lboxes.shape[0] == 0:
+        return [np.zeros((0, 5), dtype=np.float32) for i in range(num_classes)]
+    else:
+        if isinstance(lboxes, torch.Tensor):
+            # ori_lines = ori_lines.detach().cpu().numpy()
+            lboxes = lboxes.detach().cpu().numpy()
+            labels = labels.detach().cpu().numpy()
+    return [(ori_lines[labels == i, :], lboxes[labels == i, :]) for i in range(num_classes+1)]
 
 
 @HEADS.register_module()
 class RefineRetinaHead(RetinaHead):
 
-    def assign_line(
+    def __init__(
         self,
-        pro_lines_per_img: Tensor,
-        hough_lines_per_img
+        num_classes,
+        in_channels,
+        stacked_convs=4,
+        conv_cfg=None,
+        norm_cfg=None,
+        anchor_generator=dict(
+        type='AnchorGenerator',
+        octave_base_scale=4,
+        scales_per_octave=3,
+        ratios=[0.5, 1.0, 2.0],
+        strides=[8, 16, 32, 64, 128]),
+        init_cfg=dict(
+        type='Normal',
+        layer='Conv2d',
+        std=0.01,
+        override=dict(
+            type='Normal',
+            name='retina_cls',
+            std=0.01,
+            bias_prob=0.01)),
+        lbox_roi_extractor=None,
+        lbox_head=None,
+        **kwargs
     ):
-        out = pro_lines_per_img.unsqueeze(axis=1)
-        out = out.repeat(1,2,1)
+        self.stacked_convs = stacked_convs
+        self.conv_cfg = conv_cfg
+        self.norm_cfg = norm_cfg
 
-        list_pro_lines = list(pro_lines_per_img)
-        # list_hough_lines = list(hough_lines_per_img)
-        for i,pro_line in enumerate(pro_lines_per_img):
-            diff = square(hough_lines_per_img - pro_line).sum(axis=1)
-            min_idx = diff.argmin()
-            if diff[min_idx] < 250:
-                out[i,1,:] = hough_lines_per_img[min_idx]
+        super(RetinaHead, self).__init__(
+            num_classes,
+            in_channels,
+            anchor_generator=anchor_generator,
+            init_cfg=init_cfg,
+            **kwargs)
 
-        return out
+        if lbox_head is not None:
+            self.init_lbox_head(lbox_roi_extractor, lbox_head)
 
-
-
-    def comp_line(
-        self, 
-        proposals,  # type: List[Tensor]
-        lines,
-    ):
-
-        dtype = proposals[0].dtype
-        device = proposals[0].device
-        # hough_lines = [t['lines'].to(dtype) for t in targets]
-        hough_lines = []
-        for i in range(len(lines)):
-            if lines[i] is not None:
-                hough_lines.append(lines[i].to(dtype).to(device))
-        else:
-            hough_lines.append(None)
-        output = []
-
-        for proposal_per_img, hough_lines_per_img in zip(proposals, hough_lines):
-            
-            proposal_per_img.unsqueeze_(dim=1)
-            # 霍夫变换未检测到直线的情况下
-            if hough_lines_per_img is None:
-                out = proposal_per_img.repeat(1,2,1)
-                output.append(out)
-                continue
-
-            pro_lines_per_img = proposal_per_img.repeat(1,4,1)
-            pro_lines_per_img[:,0,3] = pro_lines_per_img[:,0,1]
-            pro_lines_per_img[:,1,0] = pro_lines_per_img[:,1,2]
-            pro_lines_per_img[:,2,1] = pro_lines_per_img[:,2,3]
-            pro_lines_per_img[:,3,2] = pro_lines_per_img[:,3,0]
-            pro_lines_per_img = pro_lines_per_img.reshape(-1,4)
-
-            assing_lines = self.assign_line(pro_lines_per_img, hough_lines_per_img)
-            (proposal_lines, refine_lines) = assing_lines.split(1,dim=1)
-            proposal_lines = proposal_lines.reshape(-1,4,4)
-            refine_lines = refine_lines.reshape(-1,4,4)
-            proposals = proposal_lines[:,0,:].clone()
-            proposals[:,3] = proposal_lines[:,2,3]
-            refine_proposals = refine_lines[:,0,:].clone()
-            refine_proposals[:,3] = refine_lines[:,2,3]
-
-            out = torch.stack((proposals, refine_proposals),dim=1)
-            output.append(out)
-
-        return output
+    def init_lbox_head(self, lbox_roi_extractor, lbox_head):
+        """初始化线段分类头"""
+        self.lbox_roi_extractor = build_roi_extractor(lbox_roi_extractor)
+        self.lbox_head = build_head(lbox_head)
     
     def simple_test_bboxes(self, feats, img_metas, rescale=False):
         """Test det bboxes without test-time augmentation, can be applied in
@@ -123,3 +112,44 @@ class RefineRetinaHead(RetinaHead):
             results_list = [tuple(result) for result in results_list]
 
         return results_list
+
+
+    def forward_train(self,
+                      x,
+                      img_metas,
+                      gt_bboxes,
+                      gt_labels=None,
+                      gt_bboxes_ignore=None,
+                      proposal_cfg=None,
+                      **kwargs):
+        """
+        Args:
+            x (list[Tensor]): Features from FPN.
+            img_metas (list[dict]): Meta information of each image, e.g.,
+                image size, scaling factor, etc.
+            gt_bboxes (Tensor): Ground truth bboxes of the image,
+                shape (num_gts, 4).
+            gt_labels (Tensor): Ground truth labels of each box,
+                shape (num_gts,).
+            gt_bboxes_ignore (Tensor): Ground truth bboxes to be
+                ignored, shape (num_ignored_gts, 4).
+            proposal_cfg (mmcv.Config): Test / postprocessing configuration,
+                if None, test_cfg would be used
+
+        Returns:
+            tuple:
+                losses: (dict[str, Tensor]): A dictionary of loss components.
+                proposal_list (list[Tensor]): Proposals of each image.
+        """
+        outs = self(x)
+        if gt_labels is None:
+            loss_inputs = outs + (gt_bboxes, img_metas)
+        else:
+            loss_inputs = outs + (gt_bboxes, gt_labels, img_metas)
+        losses = self.loss(*loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
+        if proposal_cfg is None:
+            return losses
+        else:
+            proposal_list = self.get_bboxes(
+                *outs, img_metas=img_metas, cfg=proposal_cfg)
+            return losses, proposal_list

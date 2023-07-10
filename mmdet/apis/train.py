@@ -11,6 +11,7 @@ from mmcv.runner import (DistSamplerSeedHook, EpochBasedRunner,
                          build_runner, get_dist_info)
 
 from mmdet.core import DistEvalHook, EvalHook
+from mmdet.core import MyEvalHook
 from mmdet.datasets import (build_dataloader, build_dataset,
                             replace_ImageToTensor)
 from mmdet.utils import find_latest_checkpoint, get_root_logger
@@ -189,7 +190,11 @@ def train_detector(model,
             shuffle=False)
         eval_cfg = cfg.get('evaluation', {})
         eval_cfg['by_epoch'] = cfg.runner['type'] != 'IterBasedRunner'
-        eval_hook = DistEvalHook if distributed else EvalHook
+        # eval_hook = DistEvalHook if distributed else EvalHook
+
+        # MyEvalHook 是为了表格定位做的
+        eval_hook = DistEvalHook if distributed else MyEvalHook
+
         # In this PR (https://github.com/open-mmlab/mmcv/pull/1193), the
         # priority of IterTimerHook has been modified from 'NORMAL' to 'LOW'.
         runner.register_hook(

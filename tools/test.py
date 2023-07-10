@@ -1,5 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+from base64 import encode
+from cgitb import reset
 import os
 import os.path as osp
 import time
@@ -7,6 +9,7 @@ import warnings
 import sys
 sys.path.append(os.getcwd())
 
+import numpy as np
 import mmcv
 import torch
 from mmcv import Config, DictAction
@@ -15,7 +18,7 @@ from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
                          wrap_fp16_model)
 
-from mmdet.apis import multi_gpu_test, single_gpu_test
+from mmdet.apis import multi_gpu_test, single_gpu_test, my_single_gpu_test
 from mmdet.datasets import (build_dataloader, build_dataset,
                             replace_ImageToTensor)
 from mmdet.models import build_detector
@@ -232,7 +235,12 @@ def main():
 
     if not distributed:
         model = MMDataParallel(model, device_ids=cfg.gpu_ids)
-        outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
+        # 原生
+        # outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
+        #                           args.show_score_thr)
+
+        # line result
+        outputs, line_results = my_single_gpu_test(model, data_loader, args.show, args.show_dir,
                                   args.show_score_thr)
     else:
         model = MMDistributedDataParallel(
@@ -259,12 +267,145 @@ def main():
             ]:
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
+
+            # line detection 对output做的处理
+            for i,img in enumerate(outputs):
+                bboxes = img[0]
+                # 不同种类bboxes的列表
+                if isinstance(bboxes, list):
+                    for j,cat_bboxes in enumerate(bboxes):
+                        inds = np.where(cat_bboxes[:,4]>=0.0)
+                        outputs[i][0][j] = cat_bboxes[inds]
+                else:
+                    inds = np.where(bboxes[:,4]>=0.0)
+                    outputs[i][0] = bboxes[inds]
+
+            # 原生代码
             metric = dataset.evaluate(outputs, **eval_kwargs)
+
+            # _ = dataset.evaluate_lines()
+
+            # 修正结果
+            refine_outputs = refine_bboxes(outputs, line_results)
+            metric_refine = dataset.evaluate(refine_outputs, **eval_kwargs)
             print(metric)
+            # 打印修正后结果
+            print("\n refine result\n")
+            print(metric_refine)
             metric_dict = dict(config=args.config, metric=metric)
             if args.work_dir is not None and rank == 0:
                 mmcv.dump(metric_dict, json_file)
 
+# results 为模型输出
+def refine_bboxes(results, line_results):
+    for i, data in enumerate(results):
+        # bboxes是一个列表，每个元素代表每种目标的预测框 ps:在有mask的时候
+        bboxes = data[0]
+        det_lines = line_results[i][1][1]
+        det_lines[:,:4] = line_results[i][1][0]
+        if isinstance(bboxes,list):# 有mask的情况
+            table_bboxes = bboxes[0]
+        else:
+            table_bboxes = bboxes
+        refine_bboxes = _refine_bboxes(table_bboxes, det_lines)
+        if isinstance(bboxes,list):
+            results[i][0][0] = refine_bboxes
+        else:
+            results[i][0] = refine_bboxes
+
+    return results
+
+# bbox为array(n,5) det_lines为(n,5)
+def _refine_bboxes(bboxes:np, det_lines:np.array):
+    # 每个边界框的中心点坐标
+    if det_lines.shape[0] == 0:
+        return bboxes
+    cent = np.empty((bboxes.shape[0], 2))
+    cent[:,0] = (bboxes[:,0] + bboxes[:,2]) / 2.0
+    cent[:,1] = (bboxes[:,1] + bboxes[:,3]) / 2.0
+
+    encode_bboxes = np.empty((bboxes.shape[0],4))
+    encode_bboxes[:,0] = bboxes[:,1] - cent[:,1]
+    encode_bboxes[:,1] = bboxes[:,2] - cent[:,0]
+    encode_bboxes[:,2] = bboxes[:,3] - cent[:,1]
+    encode_bboxes[:,3] = bboxes[:,0] - cent[:,0]
+
+    match_mat = np.zeros((bboxes.shape[0]*4, 5))
+    match_mat[:,:4] = _b2l(bboxes)
+    for i, line in enumerate(match_mat):
+        diff = np.square(det_lines[:,:4] - np.repeat(line[:4].reshape(1,4), det_lines.shape[0], axis=0))
+        diff_1 = np.sqrt(diff[:,0] + diff[:,1])
+        diff_2 = np.sqrt(diff[:,2] + diff[:,3])
+        diff = (diff_1 + diff_2) / 2.0
+
+        min_idx = diff.argmin()
+
+        # TODO: 这里有个超参数
+        if diff[min_idx] <= 15.0:
+            match_mat[i] = det_lines[min_idx]
+
+    match_mat[0::4, [0,1,3]] = match_mat[0::4, [1,2,0]] - cent[:,[1,0,0]]
+    match_mat[0::4, 2] = encode_bboxes[:,2]
+    match_mat[1::4, [0,1,2]] = match_mat[1::4, [1,0,3]] - cent[:,[1,0,1]]
+    match_mat[1::4, 3] = encode_bboxes[:,3]
+    match_mat[2::4, [1,2,3]] = match_mat[2::4, [2,1,0]] - cent[:,[0,1,0]]
+    match_mat[2::4, 0] = encode_bboxes[:,0]
+    match_mat[3::4, [0,2,3]] = match_mat[3::4, [1,3,0]] - cent[:,[1,1,0]]
+    match_mat[3::4, 1] = encode_bboxes[:,1]
+
+    # 先不使用概率
+    for i, encode_bbox in enumerate(encode_bboxes):
+        up = (match_mat[[0+i*4,1+i*4,3+i*4], 0] - np.repeat(encode_bbox[0], 3, axis=0))
+        up = np.sum(up)
+        div = np.sum(np.ceil(match_mat[[0+i*4,1+i*4,3+i*4], 4]))
+        if div == 0.0:
+            div = 1.0
+        up = up / div + encode_bbox[0]
+
+        right = (match_mat[[0+i*4,1+i*4,2+i*4], 1] - np.repeat(encode_bbox[1], 3, axis=0))
+        right = np.sum(right)
+        div = np.sum(np.ceil(match_mat[[0+i*4,1+i*4,2+i*4], 4]))
+        if div == 0.0:
+            div = 1.0
+        right = right / div + encode_bbox[1]
+
+        bottom = (match_mat[[1+i*4,2+i*4,3+i*4], 2] - np.repeat(encode_bbox[2], 3, axis=0))
+        bottom = np.sum(bottom)
+        div = np.sum(np.ceil(match_mat[[1+i*4,2+i*4,3+i*4], 4]))
+        if div == 0.0:
+            div = 1.0
+        bottom = bottom / div + encode_bbox[2]
+
+        left = (match_mat[[0+i*4,2+i*4,3+i*4], 3] - np.repeat(encode_bbox[3], 3, axis=0))
+        left = np.sum(left)
+        div = np.sum(np.ceil(match_mat[[0+i*4,2+i*4,3+i*4], 4]))
+        if div == 0.0:
+            div = 1.0
+        left =  left / div + encode_bbox[3]
+
+        encode_bboxes[i] = np.array([up, right, bottom, left])
+        
+    refine_bboxes = np.empty((bboxes.shape[0], 5))
+    refine_bboxes[:, 0] = cent[:,0] + encode_bboxes[:,3]  # x1
+    refine_bboxes[:, 1] = cent[:,1] + encode_bboxes[:,0]  # y1
+    refine_bboxes[:, 2] = cent[:,0] + encode_bboxes[:,1]  # x2
+    refine_bboxes[:, 3] = cent[:,1] + encode_bboxes[:,2]  # y2
+    refine_bboxes[:, 4] = bboxes[:, 4]
+    return refine_bboxes
+
+# bboxes为(n,4)or(n,5)
+# 输出为(n*4,4)
+def _b2l(bboxes:np.array):
+    num_boxes = bboxes.shape[0]
+    gt_lines = np.empty((num_boxes*4, 4), dtype=np.float32)
+    for i, box in enumerate(bboxes):
+        x1, y1, x2, y2 = bboxes[i,0], bboxes[i,1], bboxes[i,2], bboxes[i,3]
+
+        gt_lines[i*4+0] = x1, y1, x2, y1
+        gt_lines[i*4+1] = x2, y1, x2, y2
+        gt_lines[i*4+2] = x1, y2, x2, y2
+        gt_lines[i*4+3] = x1, y1, x1, y2
+    return gt_lines
 
 if __name__ == '__main__':
     main()

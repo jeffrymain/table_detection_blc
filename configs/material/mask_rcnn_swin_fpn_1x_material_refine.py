@@ -1,4 +1,4 @@
-_base_ = '../mask_rcnn/mask_rcnn_r50_fpn_1x_coco.py'
+_base_ = '../mask_rcnn/mask_rcnn_swin_fpn_1x_coco.py'
 
 custom_imports=dict(
     imports=['mmdet.models.roi_heads.refine_roi_head'])
@@ -6,7 +6,7 @@ custom_imports=dict(
 # 我们需要对头中的类别数量进行修改来匹配数据集的标注
 model = dict(
     roi_head=dict(  # RoIHead 封装了两步(two-stage)/级联(cascade)检测器的第二步。
-        type='RefineRoIHead',  # RoI head 的类型，这是我自己定义的ROI head。更多细节请参考 https://github.com/open-mmlab/mmdetection/blob/master/mmdet/models/roi_heads/standard_roi_head.py#L10。
+        type='RefineStandardRoIHead',  # RoI head 的类型，这是我自己定义的ROI head。更多细节请参考 https://github.com/open-mmlab/mmdetection/blob/master/mmdet/models/roi_heads/standard_roi_head.py#L10。
         bbox_roi_extractor=dict(  # 用于 bbox 回归的 RoI 特征提取器。
             type='SingleRoIExtractor',  # RoI 特征提取器的类型，大多数方法使用  SingleRoIExtractor，更多细节请参考 https://github.com/open-mmlab/mmdetection/blob/master/mmdet/models/roi_heads/roi_extractors/single_level.py#L10。
             roi_layer=dict(  # RoI 层的配置
@@ -50,31 +50,61 @@ model = dict(
             loss_mask=dict(  # mask 分支的损失函数配置。
                 type='CrossEntropyLoss',  # 用于分割的损失类型。
                 use_mask=True,  # 是否只在正确的类中训练 mask。
-                loss_weight=1.0))),  # mask 分支的损失权重.
+                loss_weight=1.0)),
+        lbox_roi_extractor=dict(
+            type='SingleRoIExtractor',
+            roi_layer=dict(
+                type='RoIAlign',
+                output_size=7,
+                sampling_ratio=0
+            ),
+            out_channels=256,
+            featmap_strides=[4, 8, 16, 32]
+        ),
+        lbox_head=dict(
+            type='ClassifyHead',
+            in_channels=256,
+            fc_out_channels=1024,
+            roi_feat_size=7,
+            num_classes=1,
+            loss_cls=dict(
+                type='CrossEntropyLoss',
+                use_sigmoid=False, 
+                loss_weight=1.0
+            ),
+        )
+    ),  # mask 分支的损失权重.
     test_cfg = dict(
         rcnn = dict(
             use_refine = True,
+            cls_line_cfg = dict(
+                pos_thr = 0.8,  # 目前还没用到这个阈值
+            )
         )
     )
 )
 
 # 修改数据集相关设置
-dataset_type = 'CocoDataset'
+dataset_type = 'MaterialDataset'
 classes = ('table',)
 data = dict(
     train=dict(
-        img_prefix='data/material_papers/img',
+        type=dataset_type,
+        img_prefix='data/material_papers_e/img',
         classes=classes,
-        ann_file='data/material_papers/ann/train.json'),
+        ann_file='data/material_papers_e/ann/coco_formate_ann/train.json'),
     val=dict(
-        img_prefix='data/material_papers/img',
+        type=dataset_type,
+        img_prefix='data/material_papers_e/img',
         classes=classes,
-        ann_file='data/material_papers/ann/val.json'),
+        ann_file='data/material_papers_e/ann/coco_formate_ann/val.json'),
     test=dict(
-        img_prefix='data/material_papers/img',
+        type=dataset_type,
+        img_prefix='data/material_papers_e/img',
         classes=classes,
-        ann_file='data/material_papers/ann/test.json')
+        ann_file='data/material_papers_e/ann/coco_formate_ann/test.json')
 )
+evaluation = dict(metric=['bbox'])
 
 # 我们可以使用预训练的 Mask R-CNN 来获取更好的性能
 load_from = 'checkpoints/mask_rcnn_r50_fpn_1x_coco_20200205-d4b0c5d6.pth'

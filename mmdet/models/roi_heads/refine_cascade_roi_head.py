@@ -17,162 +17,220 @@ import numpy as np
 from torch import nn, Tensor, square, sqrt
 from typing import Optional, List, Dict, Tuple
 
+from .test_mixins import LBoxTestMixin
+from ...datasets.pipelines.formatting import to_tensor
+
+def line2result(ori_lines, lboxes, labels, num_classes):
+    if lboxes.shape[0] == 0:
+        return [np.zeros((0, 5), dtype=np.float32) for i in range(num_classes)]
+    else:
+        if isinstance(lboxes, torch.Tensor):
+            # ori_lines = ori_lines.detach().cpu().numpy()
+            lboxes = lboxes.detach().cpu().numpy()
+            labels = labels.detach().cpu().numpy()
+    return [(ori_lines[labels == i, :], lboxes[labels == i, :]) for i in range(num_classes+1)]
 
 @HEADS.register_module()
-class RefineCascadeRoIHead(CascadeRoIHead):
+class RefineCascadeRoIHead(CascadeRoIHead, LBoxTestMixin):
+    def __init__(self,
+                 num_stages,
+                 stage_loss_weights,
+                 bbox_roi_extractor=None,
+                 bbox_head=None,
+                 mask_roi_extractor=None,
+                 mask_head=None,
+                 lbox_roi_extractor=None,
+                 lbox_head=None,
+                 shared_head=None,
+                 train_cfg=None,
+                 test_cfg=None,
+                 pretrained=None,
+                 init_cfg=None):
+        assert bbox_roi_extractor is not None
+        assert bbox_head is not None
+        assert shared_head is None, \
+            'Shared head is not supported in Cascade RCNN anymore'
+
+        self.num_stages = num_stages
+        self.stage_loss_weights = stage_loss_weights
+        super(CascadeRoIHead, self).__init__(
+            bbox_roi_extractor=bbox_roi_extractor,
+            bbox_head=bbox_head,
+            mask_roi_extractor=mask_roi_extractor,
+            mask_head=mask_head,
+            shared_head=shared_head,
+            train_cfg=train_cfg,
+            test_cfg=test_cfg,
+            pretrained=pretrained,
+            init_cfg=init_cfg)
+
+        if lbox_head is not None:
+            self.init_lbox_head(lbox_roi_extractor, lbox_head)
 
 
-    def assign_line(
-        self,
-        pro_lines_per_img: Tensor,
-        hough_lines_per_img
-    ):
-        out = pro_lines_per_img.unsqueeze(axis=1)
-        out = out.repeat(1,2,1)
+    def init_lbox_head(self, lbox_roi_extractor, lbox_head):
+        """初始化线段分类头"""
+        self.lbox_roi_extractor = build_roi_extractor(lbox_roi_extractor)
+        self.lbox_head = build_head(lbox_head)
 
-        list_pro_lines = list(pro_lines_per_img)
-        # list_hough_lines = list(hough_lines_per_img)
-        for i,pro_line in enumerate(pro_lines_per_img):
-            diff = square(hough_lines_per_img - pro_line).sum(axis=1)
-            min_idx = diff.argmin()
-            if diff[min_idx] < 250:
-                out[i,1,:] = hough_lines_per_img[min_idx]
-
-        return out
-
-
-
-    def comp_line(
-        self, 
-        proposals,  # type: List[Tensor]
-        lines,
-    ):
-
-        dtype = proposals[0].dtype
-        device = proposals[0].device
-        # hough_lines = [t['lines'].to(dtype) for t in targets]
-        hough_lines = []
-        for i in range(len(lines)):
-            if lines[i] is not None:
-                hough_lines.append(lines[i].to(dtype).to(device))
-        else:
-            hough_lines.append(None)
-        output = []
-
-        for proposal_per_img, hough_lines_per_img in zip(proposals, hough_lines):
-            
-            proposal_per_img.unsqueeze_(dim=1)
-            # 霍夫变换未检测到直线的情况下
-            if hough_lines_per_img is None:
-                out = proposal_per_img.repeat(1,2,1)
-                output.append(out)
-                continue
-
-            pro_lines_per_img = proposal_per_img.repeat(1,4,1)
-            pro_lines_per_img[:,0,3] = pro_lines_per_img[:,0,1]
-            pro_lines_per_img[:,1,0] = pro_lines_per_img[:,1,2]
-            pro_lines_per_img[:,2,1] = pro_lines_per_img[:,2,3]
-            pro_lines_per_img[:,3,2] = pro_lines_per_img[:,3,0]
-            pro_lines_per_img = pro_lines_per_img.reshape(-1,4)
-
-            assing_lines = self.assign_line(pro_lines_per_img, hough_lines_per_img)
-            (proposal_lines, refine_lines) = assing_lines.split(1,dim=1)
-            proposal_lines = proposal_lines.reshape(-1,4,4)
-            refine_lines = refine_lines.reshape(-1,4,4)
-            proposals = proposal_lines[:,0,:].clone()
-            proposals[:,3] = proposal_lines[:,2,3]
-            refine_proposals = refine_lines[:,0,:].clone()
-            refine_proposals[:,3] = refine_lines[:,2,3]
-
-            out = torch.stack((proposals, refine_proposals),dim=1)
-            output.append(out)
-
-        return output
-    # def assign_line(
-    #     self,
-    #     pro_lines_per_img: Tensor,
-    #     hough_lines_per_img,
-    #     pro_x: Tensor,
-    #     pro_y: Tensor
-    # ):
-
-    #     out = pro_lines_per_img.unsqueeze(axis=1)
-    #     out = out.repeat(1,2,1)
-
-    #     list_pro_lines = list(pro_lines_per_img)
-    #     # list_hough_lines = list(hough_lines_per_img)
-    #     line_num = pro_lines_per_img.shape[0] - 1
-    #     for i,pro_line in enumerate(pro_lines_per_img):
-    #         # diff = square(hough_lines_per_img - pro_line).sum(axis=1)
-    #         diff = square(hough_lines_per_img - pro_line)
-    #         diff_1 = sqrt(diff[:,0] + diff[:,1])
-    #         diff_2 = sqrt(diff[:,2] + diff[:,3]) 
-    #         diff = (diff_1 + diff_2).div_(2.0)
-
-    #         min_idx = diff.argmin()
-
-    #         pro_i = int(line_num/4)
-    #         if i % 2 == 0:  # 横线
-    #             z = pro_y[pro_i] / 13.0
-    #         else:
-    #             z = pro_x[pro_i] / 13.0
-
-    #         if diff[min_idx] < z:
-    #             out[i,1,:] = hough_lines_per_img[min_idx]
-
-    #     return out
+    # TODO 需要修改
+    def forward_dummy(self, x, proposals):
+        """Dummy forward function."""
+        # bbox head
+        outs = ()
+        rois = bbox2roi([proposals])
+        if self.with_bbox:
+            for i in range(self.num_stages):
+                bbox_results = self._bbox_forward(i, x, rois)
+                outs = outs + (bbox_results['cls_score'],
+                               bbox_results['bbox_pred'])
+        # mask heads
+        if self.with_mask:
+            mask_rois = rois[:100]
+            for i in range(self.num_stages):
+                mask_results = self._mask_forward(i, x, mask_rois)
+                outs = outs + (mask_results['mask_pred'], )
+        return outs
 
 
+    def forward_train(self,
+                      x,
+                      img_metas,
+                      proposal_list,
+                      gt_bboxes,
+                      gt_labels,
+                      gt_bboxes_ignore=None,
+                      gt_masks=None):
+        """
+        Args:
+            x (list[Tensor]): list of multi-level img features.
+            img_metas (list[dict]): list of image info dict where each dict
+                has: 'img_shape', 'scale_factor', 'flip', and may also contain
+                'filename', 'ori_shape', 'pad_shape', and 'img_norm_cfg'.
+                For details on the values of these keys see
+                `mmdet/datasets/pipelines/formatting.py:Collect`.
+            proposals (list[Tensors]): list of region proposals.
+            gt_bboxes (list[Tensor]): Ground truth bboxes for each image with
+                shape (num_gts, 4) in [tl_x, tl_y, br_x, br_y] format.
+            gt_labels (list[Tensor]): class indices corresponding to each box
+            gt_bboxes_ignore (None | list[Tensor]): specify which bounding
+                boxes can be ignored when computing the loss.
+            gt_masks (None | Tensor) : true segmentation masks for each box
+                used if the architecture supports a segmentation task.
 
-    # def comp_line(
-    #     self, 
-    #     proposals,  # type: List[Tensor]
-    #     lines,
-    # ):
+        Returns:
+            dict[str, Tensor]: a dictionary of loss components
+        """
+        losses = dict()
+        for i in range(self.num_stages):
+            self.current_stage = i
+            rcnn_train_cfg = self.train_cfg[i]
+            lw = self.stage_loss_weights[i]
 
-    #     dtype = proposals[0].dtype
-    #     device = proposals[0].device
-    #     # hough_lines = [t['lines'].to(dtype) for t in targets]
-    #     hough_lines = []
-    #     for i in range(len(lines)):
-    #         if lines[i] is not None:
-    #             hough_lines.append(lines[i].to(dtype).to(device))
-    #     else:
-    #         hough_lines.append(None)
-    #     output = []
+            # assign gts and sample proposals
+            sampling_results = []
+            if self.with_bbox or self.with_mask:
+                bbox_assigner = self.bbox_assigner[i]
+                bbox_sampler = self.bbox_sampler[i]
+                num_imgs = len(img_metas)
+                if gt_bboxes_ignore is None:
+                    gt_bboxes_ignore = [None for _ in range(num_imgs)]
 
-    #     for proposal_per_img, hough_lines_per_img in zip(proposals, hough_lines):
-            
-    #         pro_width = proposal_per_img[:,2] - proposal_per_img[:,0]
-    #         pro_height = proposal_per_img[:,3] - proposal_per_img[:,1]
+                for j in range(num_imgs):
+                    assign_result = bbox_assigner.assign(
+                        proposal_list[j], gt_bboxes[j], gt_bboxes_ignore[j],
+                        gt_labels[j])
+                    sampling_result = bbox_sampler.sample(
+                        assign_result,
+                        proposal_list[j],
+                        gt_bboxes[j],
+                        gt_labels[j],
+                        feats=[lvl_feat[j][None] for lvl_feat in x])
+                    sampling_results.append(sampling_result)
 
-    #         proposal_per_img.unsqueeze_(dim=1)
-    #         # 霍夫变换未检测到直线的情况下
-    #         if hough_lines_per_img is None:
-    #             out = proposal_per_img.repeat(1,2,1)
-    #             output.append(out)
-    #             continue
+            # bbox head forward and loss
+            bbox_results = self._bbox_forward_train(i, x, sampling_results,
+                                                    gt_bboxes, gt_labels,
+                                                    rcnn_train_cfg)
 
-    #         pro_lines_per_img = proposal_per_img.repeat(1,4,1)
-    #         pro_lines_per_img[:,0,3] = pro_lines_per_img[:,0,1]
-    #         pro_lines_per_img[:,1,0] = pro_lines_per_img[:,1,2]
-    #         pro_lines_per_img[:,2,1] = pro_lines_per_img[:,2,3]
-    #         pro_lines_per_img[:,3,2] = pro_lines_per_img[:,3,0]
-    #         pro_lines_per_img = pro_lines_per_img.reshape(-1,4)
+            for name, value in bbox_results['loss_bbox'].items():
+                losses[f's{i}.{name}'] = (
+                    value * lw if 'loss' in name else value)
 
-    #         assing_lines = self.assign_line(pro_lines_per_img, hough_lines_per_img, pro_width, pro_height)
-    #         (proposal_lines, refine_lines) = assing_lines.split(1,dim=1)
-    #         proposal_lines = proposal_lines.reshape(-1,4,4)
-    #         refine_lines = refine_lines.reshape(-1,4,4)
-    #         proposals = proposal_lines[:,0,:].clone()
-    #         proposals[:,3] = proposal_lines[:,2,3]
-    #         refine_proposals = refine_lines[:,0,:].clone()
-    #         refine_proposals[:,3] = refine_lines[:,2,3]
+            # mask head forward and loss
+            if self.with_mask:
+                mask_results = self._mask_forward_train(
+                    i, x, sampling_results, gt_masks, rcnn_train_cfg,
+                    bbox_results['bbox_feats'])
+                for name, value in mask_results['loss_mask'].items():
+                    losses[f's{i}.{name}'] = (
+                        value * lw if 'loss' in name else value)
 
-    #         out = torch.stack((proposals, refine_proposals),dim=1)
-    #         output.append(out)
+            # refine bboxes
+            if i < self.num_stages - 1:
+                pos_is_gts = [res.pos_is_gt for res in sampling_results]
+                # bbox_targets is a tuple
+                roi_labels = bbox_results['bbox_targets'][0]
+                with torch.no_grad():
+                    cls_score = bbox_results['cls_score']
+                    if self.bbox_head[i].custom_activation:
+                        cls_score = self.bbox_head[i].loss_cls.get_activation(
+                            cls_score)
 
-    #     return output
+                    # Empty proposal.
+                    if cls_score.numel() == 0:
+                        break
+
+                    roi_labels = torch.where(
+                        roi_labels == self.bbox_head[i].num_classes,
+                        cls_score[:, :-1].argmax(1), roi_labels)
+                    proposal_list = self.bbox_head[i].refine_bboxes(
+                        bbox_results['rois'], roi_labels,
+                        bbox_results['bbox_pred'], pos_is_gts, img_metas)
+
+        device = x[0].device
+        line_bboxes_list = [img_meta['line_bboxes'].data.to(device) for img_meta in img_metas]
+        line_labels_list = [img_meta['line_labels'].data.type(torch.int64).to(device) for img_meta in img_metas]
+
+        lbox_results = self._lbox_forward_train(x, line_bboxes_list, line_labels_list)
+        losses.update(lbox_results['loss_lbox'])
+
+
+        return losses
+
+    def _lbox_forward(self, x, rois):
+        lbox_feats = self.lbox_roi_extractor(
+            x[:self.lbox_roi_extractor.num_inputs], rois
+        )
+        if self.with_shared_head:
+            lbox_feats = self.lbox_head(lbox_feats)
+        
+        cls_score = self.lbox_head(lbox_feats)
+
+        lbox_results = dict(
+            cls_score=cls_score, lbox_feats=lbox_feats
+        )
+        return lbox_results
+
+    def _lbox_forward_train(self, x, line_bboxes_list, line_labels_list):
+        rois = bbox2roi(line_bboxes_list)
+        lbox_results = self._lbox_forward(x, rois)
+
+        # lbox_targets = self.lbox_head.get_targets(sampling_results, gt_bboxes,
+        #                                           gt_labels, self.train_cfg)
+
+        line_labels = torch.cat(line_labels_list, 0)
+
+        label_weights = line_labels.new_ones(line_labels.size(0))
+        loss_lbox = self.lbox_head.loss(
+            lbox_results['cls_score'],
+            line_labels,
+            label_weights
+        )
+        lbox_results.update(loss_lbox=loss_lbox)
+        return lbox_results
+
+
 
     def simple_test(self, x, proposal_list, img_metas, rescale=False):
         """Test without augmentation.
@@ -280,16 +338,7 @@ class RefineCascadeRoIHead(CascadeRoIHead):
                 cfg=rcnn_test_cfg)
             det_bboxes.append(det_bbox)
             det_labels.append(det_label)
-        
-        # 修正目标框
-        if self.test_cfg.use_refine:
-            lines = list(meta['lines'] for meta in img_metas)
-            boxes = [det_bbox[:,:4] for det_bbox in det_bboxes]
-            output = self.comp_line(boxes, lines)
 
-            for i in range(len(det_bboxes)):
-                det_bboxes[i][:,:4] = output[i][:,1,:]
-        
         bbox_results = [
             bbox2result(det_bboxes[i], det_labels[i],
                         self.bbox_head[-1].num_classes)
@@ -345,11 +394,40 @@ class RefineCascadeRoIHead(CascadeRoIHead):
                         segm_results.append(segm_result)
             ms_segm_result['ensemble'] = segm_results
 
+        # 线段识别
+        device = x[0].device
+        ori_lines_list = [img_meta['ori_lines'] for img_meta in img_metas]
+        line_bboxes_list = [to_tensor(img_meta['line_bboxes']).to(device) for img_meta in img_metas]
+        det_lboxes, det_line_labels = self.simple_test_lboxes(
+            x, img_metas, line_bboxes_list, self.test_cfg.cls_line_cfg, rescale=rescale
+        )
+        line_results = [
+            line2result(ori_lines_list[i], det_lboxes[i], det_line_labels[i], self.lbox_head.num_classes)
+            for i in range(len(det_line_labels))    # <---- batch长度
+        ]
+
         if self.with_mask:
-            results = list(
-                zip(ms_bbox_result['ensemble'], ms_segm_result['ensemble']))
+            # results = list(
+            #     zip(ms_bbox_result['ensemble'], ms_segm_result['ensemble']))
+            results = list(zip(ms_bbox_result['ensemble'], ms_segm_result['ensemble'], line_results))
         else:
-            results = ms_bbox_result['ensemble']
+            # results = ms_bbox_result['ensemble']
+            results = [(img_bbox_results, img_line_results) for img_bbox_results, img_line_results in zip(ms_bbox_result['ensemble'], line_results)]
 
         return results
 
+        # # 修正目标框
+        # if self.test_cfg.use_refine:
+        #     lines = list(meta['lines'] for meta in img_metas)
+        #     boxes = [det_bbox[:,:4] for det_bbox in det_bboxes]
+        #     output = self.comp_line(boxes, lines)
+
+        #     for i in range(len(det_bboxes)):
+        #         det_bboxes[i][:,:4] = output[i][:,1,:]
+        
+        # bbox_results = [
+        #     bbox2result(det_bboxes[i], det_labels[i],
+        #                 self.bbox_head[-1].num_classes)
+        #     for i in range(num_imgs)
+        # ]
+        # ms_bbox_result['ensemble'] = bbox_results

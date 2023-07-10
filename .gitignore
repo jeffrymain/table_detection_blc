@@ -24,6 +24,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+ocrtools/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -117,6 +118,7 @@ data
 docs/modelzoo_statistics.md
 mmdet/.mim
 work_dirs/
+work_dirs_3_13/
 
 # Pytorch
 *.pth

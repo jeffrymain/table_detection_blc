@@ -352,33 +352,6 @@ class Collect:
 
 
 @PIPELINES.register_module()
-class NewCollect(Collect):
-    def __call__(self, results):
-        """Call function to collect keys in results. The keys in ``meta_keys``
-        will be converted to :obj:mmcv.DataContainer.
-
-        Args:
-            results (dict): Result dict contains the data to collect.
-
-        Returns:
-            dict: The result dict contains the following keys
-
-                - keys in``self.keys``
-                - ``img_metas``
-        """
-
-        data = {}
-        img_meta = {}
-        for key in self.meta_keys:
-            img_meta[key] = results[key]
-        img_meta['lines'] = results.get('lines')
-        data['img_metas'] = DC(img_meta, cpu_only=True)
-        for key in self.keys:
-            data[key] = results[key]
-        return data
-
-
-@PIPELINES.register_module()
 class WrapFieldsToLists:
     """Wrap fields of the data dictionary into lists for evaluation.
 

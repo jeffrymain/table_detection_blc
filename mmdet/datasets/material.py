@@ -1,3 +1,4 @@
+from asyncio.windows_events import NULL
 import os
 from re import M
 from unittest import result
@@ -6,123 +7,218 @@ import numpy as np
 import torch
 from PIL import Image
 import cv2
-from coco import COCO
+from .coco import COCO
+from .coco import CocoDataset
+import tempfile
+import os.path as osp
+from .builder import DATASETS
+import mmcv
 
-class MaterialDataset(object):
-    def __init__(self, root, annFile=None, transforms=None):
-        # load all image files, sorting them to 
-        # ensure that they are aligned
-        self.root = root
-        self.transforms = transforms
-        self.type = type
-        self.img_root = os.path.join(root, 'img')
-        # 如果annFile不为空，则为自定义标记
-        if annFile == None:
-            annFile = os.path.join(root, 'ann', 'table.json')
-        self.coco = COCO(annFile)
-        
-        self.cats = self.coco.loadCats(self.coco.getCatIds())
-        self.catIds = self.coco.getCatIds(catNms=['table'])
-        self.imgIds = self.coco.getImgIds(catIds=self.catIds)
+from mmcv.utils import print_log
 
-        pass
+class HoughLineMixin:
+    def _format_vline(self, lines):
+        """
+        将垂直线段小坐标转换成大坐标
+        """
+        for i, line in enumerate(lines):
+            x1, x2, y1, y2 = line
+            if x1 == y1:
+                line[1] = y2
+                line[3] = x2            
+        return lines
 
-        
-    def __getitem__(self, idx):
-        # load images and masks
-        imgIds = self.imgIds[idx]
-        img_info = self.coco.loadImgs(imgIds)[0]
+    def _load_bboxes(self, results):
+        """Private function to load bounding box annotations.
 
-        img_path = os.path.join(self.img_root, img_info['file_name'])
-        img = Image.open(img_path).convert('RGB')
+        Args:
+            results (dict): Result dict from :obj:`mmdet.CustomDataset`.
 
-        # note that we haven't converted the mask to RGB,
-        # because each color corresponds to a different instance
-        # with 0 being background
-        annIds = self.coco.getAnnIds(imgIds=img_info['id'], catIds=self.catIds, iscrowd=None)
-        anns = self.coco.loadAnns(annIds)
+        Returns:
+            dict: The dict contains loaded bounding box annotations.
+        """
 
-        # 生成mask
-        masks = np.zeros(shape=(len(anns),img_info['height'],img_info['width']))
-        for index, ann in enumerate(anns): 
-            m = self.coco.annToMask(ann)    # m的维度是高x宽
-            m = m == [[[1]]]
-            # print(np.sum(m))
-            masks[index] = m
+        ann_info = results['ann_info']
+        results['gt_bboxes'] = ann_info['bboxes'].copy()
 
-        # 给每个mask生成 bounding box coordinates
-        num_objs = len(anns)
-        boxes = []
-        for i in range(num_objs):
-            xmin = anns[i]['bbox'][0]
-            ymin = anns[i]['bbox'][1]
-            xmax = xmin + anns[i]['bbox'][2]
-            ymax = ymin + anns[i]['bbox'][3]
-            boxes.append(np.asarray([xmin, ymin, xmax, ymax],dtype=np.int64))
-        
-        # 把所有东西转成tensor格式
-        boxes = np.array(boxes)
-        boxes = torch.as_tensor(boxes, dtype=torch.float32)
-        # 只有一个种类--表格
-        labels = torch.ones((num_objs,), dtype=torch.int64)
-        masks = torch.as_tensor(masks, dtype=torch.uint8)
-        image_id = torch.tensor([imgIds])
-        area = torch.as_tensor([ann['area'] for ann in anns], dtype=torch.float32)
-        iscrowd = torch.zeros((num_objs,), dtype=torch.int64)
-        
-        target = {}
-        target["boxes"] = boxes
-        target["labels"] = labels
-        target["masks"] = masks
-        target["image_id"] = image_id
-        target["area"] = area
-        target["iscrowd"] = iscrowd
+        if self.denorm_bbox:
+            h, w = results['img_shape'][:2]
+            bbox_num = results['gt_bboxes'].shape[0]
+            if bbox_num != 0:
+                results['gt_bboxes'][:, 0::2] *= w
+                results['gt_bboxes'][:, 1::2] *= h
+            results['gt_bboxes'] = results['gt_bboxes'].astype(np.float32)
 
-        houghimg = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
-        houghimg = cv2.GaussianBlur(houghimg,(3,3),0)
-        edges = cv2.Canny(houghimg, 50, 150, apertureSize = 3)
-        lines = cv2.HoughLinesP(edges,1,np.pi/180,int(img_info['width']/4),minLineLength=int(img_info['width']/4),maxLineGap=3)
+        gt_bboxes_ignore = ann_info.get('bboxes_ignore', None)
+        if gt_bboxes_ignore is not None:
+            results['gt_bboxes_ignore'] = gt_bboxes_ignore.copy()
+            results['bbox_fields'].append('gt_bboxes_ignore')
+        results['bbox_fields'].append('gt_bboxes')
 
-        # houghimg = np.zeros((img_info['height'], img_info['width'],3), np.uint8)
-        # houghimg.fill(255)
-        # houghimg = cv2.cvtColor(houghimg, cv2.COLOR_RGB2BGR)
-        # if lines is not None:
-        #     for line in lines:
-        #         for x1,y1,x2,y2 in line:
-        #             cv2.line(img,(x1,y1),(x2,y2),(0,0,0),2)
+        gt_is_group_ofs = ann_info.get('gt_is_group_ofs', None)
+        if gt_is_group_ofs is not None:
+            results['gt_is_group_ofs'] = gt_is_group_ofs.copy()
 
-        img = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
-        cv2.imshow(f'idx={idx},img_index={imgIds}', img)
-        cv2.waitKey()
+        return results
 
-        if lines is not None:
-            lines = np.squeeze(lines, axis=1)
-            lines = torch.as_tensor(lines, dtype=torch.float32)
+    def _b2l(self, bboxes:np.array):
+        num_boxes = bboxes.shape[0]
+        gt_lines = np.empty((num_boxes*4, 4), dtype=np.float32)
+        for i, box in enumerate(bboxes):
+            x1, y1, x2, y2 = bboxes[i,0], bboxes[i,1], bboxes[i,2], bboxes[i,3]
+
+            gt_lines[i*4+0] = x1, y1, x2, y1
+            gt_lines[i*4+1] = x2, y1, x2, y2
+            gt_lines[i*4+2] = x1, y2, x2, y2
+            gt_lines[i*4+3] = x1, y1, x1, y2
+        return gt_lines
+
+    def _classify_lines(self, lines:np.array, gt_bboxes:np.array):
+        if gt_bboxes is None:
+            line_labels = np.full(lines.shape[0], False, dtype=bool)
+            return line_labels
+
+        gt_lines = self._b2l(gt_bboxes)
+        line_labels = np.full(lines.shape[0], False, dtype=bool)
+        for i, line in enumerate(lines):
+            l_x1, l_y1, l_x2, l_y2 = line
+            for gt_line in gt_lines:
+                gt_x1, gt_y1, gt_x2, gt_y2 = gt_line
+                d = np.sum(np.square(np.array([l_x1, l_y1]) - np.array([gt_x1, gt_y1]))) \
+                    + np.sum(np.square(np.array(l_x2, l_y2) - np.array(gt_x2, gt_y2)))
+                if d <= 30.0:
+                    line_labels[i] = True
+                    break
+        return line_labels
+
+def xywh2xyxy(ann):
+    x1 = ann[0]
+    y1 = ann[1]
+    x2 = ann[0] + ann[2] - 1
+    y2 = ann[1] + ann[3] - 1
+    return [x1, y1, x2, y2]
+
+@DATASETS.register_module()
+class MaterialDataset(CocoDataset, HoughLineMixin):
+    CLASSES = ('table')
+
+    def _line_cls2json(self, results):
+        lcls_json_result = []
+        for idx in range(len(self)):
+            img_id = self.img_ids[idx]
+            line_result = results[idx]
+
+            for label in range(len(line_result)):
+                for i in range(line_result[label][0].shape[0]):
+                    data = dict()
+                    data['img_id'] = img_id
+                    data['ori_line'] = line_result[label][0][i].tolist()
+                    data['line_box'] = line_result[label][1][i][:4].tolist()
+                    data['score'] = line_result[label][1][i][4]
+                    data['label'] = label
+                    lcls_json_result.append(data)
+
+        return lcls_json_result
+
+    def line_results2json(self, results, jsonfile_prefix=None):
+
+        if jsonfile_prefix is None:
+            tmp_dir = tempfile.TemporaryDirectory()
+            jsonfile_prefix = osp.join(tmp_dir.name, 'results')
         else:
-            lines = torch.tensor([0,0,img_info['width'],0], dtype=torch.float32)
-            lines = lines.resize(1,4)
-        target['lines'] = lines
-        # houghimg = Image.fromarray(cv2.cvtColor(houghimg, cv2.COLOR_BGR2RGB))
+            tmp_dir = None
 
-        if self.transforms is not None:
-            img, target = self.transforms(img, target)
-            # houghimg, _ = self.transforms(houghimg, None)
+        # 线段结果存进文件
+        result_files = dict()
+        json_results = self._line_cls2json(results)
 
-        return img, target
+        result_files['line_result'] = f'{jsonfile_prefix}.line_ressult.json'
 
-    def __len__(self):
-        return len(self.imgIds)
-        pass
-    
-    @staticmethod
-    def collate_fn(batch):
-        return tuple(zip(*batch))
+        mmcv.dump(json_results, result_files['line_result'])
+        return result_files, tmp_dir
 
-if __name__ == '__main__':
-    root = 'D://wolftail//repos//datasets//material_papers'
-    train_set = MaterialDataset(root=root)
-    # train_set[78369]
-    # train_set[59648]
-    train_set[33]
-    for obj in train_set:
-        pass
+
+    def evaluate_line_cls(self, result_files, coco_gt):
+        try:
+            predictions = mmcv.load(result_files['line_result'])
+        except IndexError:
+            # TODO: 接入logger
+            print('The testing results of the whole dataset is empty.')
+
+        tp = 0
+        fp = 0
+        fn = 0
+        tn = 0
+        cls_results = dict()
+        for i, data in enumerate(predictions):
+            img_id = data['img_id']
+            ori_line = np.array(data['ori_line']).reshape(1,4)
+            annIds = coco_gt.getAnnIds(img_id)
+            anns = coco_gt.loadAnns(annIds)
+            gt_boxes = np.array([xywh2xyxy(ann['bbox']) for ann in anns])
+            gt_label = self._classify_lines(ori_line, gt_boxes)
+            label = bool(data['label'])
+            if label:
+                if gt_label:
+                    tp += 1
+                else:
+                    fp += 1
+            else:
+                if gt_label:
+                    fn += 1
+                else:
+                    tn += 1
+
+        cls_results['tp'] = tp
+        cls_results['fp'] = fp
+        cls_results['fn'] = fn
+        cls_results['tn'] = tn
+        try:
+            cls_results['Accuracy'] = float(tp + tn) / (tp + fp + fn + tn)
+        except:
+            cls_results['Accuracy'] = float(-1)
+        try:
+            cls_results['Precision'] = float(tp) / (tp + fp)
+        except:
+            cls_results['Precision'] = float(-1)
+        try:
+            cls_results['Recall'] = float(tp) / (tp + fn)
+        except:
+            cls_results['Recall'] = float(-1)
+        try:
+            cls_results['F-Score'] = (1 + 1) * cls_results['Precision'] * cls_results['Recall'] / (1 * (cls_results['Precision'] + cls_results['Recall']))
+        except:
+            cls_results['F-Score'] = float(-1)
+        return cls_results
+
+    def evaluate_lines(
+        self,
+        runner,
+        results,
+        jsonfile_prefix=None,
+        classwise=False
+    ):
+        """ 评价线段分类
+        """
+        coco_gt = self.coco
+
+        result_files, tmp_dir = self.line_results2json(results, jsonfile_prefix)
+
+        eval_results = self.evaluate_line_cls(result_files, coco_gt)
+
+        msg = f'Evaluating Lines...'
+        print_log(msg, logger=runner.logger)
+
+        msg = f"\nTP = {eval_results['tp']} | FP = {eval_results['fp']}\n"
+        msg += f"FN = {eval_results['fn']} | TN = {eval_results['tn']}\n"
+        msg += f"Accuracy = {eval_results['Accuracy']} | Precision = {eval_results['Precision']}\n"
+        msg += f"Recall   = {eval_results['Recall']} | F-Score   = {eval_results['F-Score']}\n"
+        print_log(msg, logger=runner.logger)
+
+        for name, val in eval_results.items():
+            runner.log_buffer.output[name] = val
+        
+        
+        if tmp_dir is not None:
+            tmp_dir.cleanup()
+        return eval_results

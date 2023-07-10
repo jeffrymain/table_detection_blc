@@ -11,6 +11,52 @@ from mmdet.core import (bbox2roi, bbox_mapping, merge_aug_bboxes,
 if sys.version_info >= (3, 7):
     from mmdet.utils.contextmanagers import completed
 
+class LBoxTestMixin:
+    
+    def simple_test_lboxes(
+        self, 
+        x,
+        img_metas,
+        line_bboxes_list,
+        cls_line_cfg,
+        rescale=False
+    ):
+        rois = bbox2roi(line_bboxes_list)
+
+        # TODO: if rois.shape[0] == 0:
+
+        # lbox_results内含'cls_score' 'lbox_feats'
+        lbox_results = self._lbox_forward(x, rois)
+        img_shapes = tuple(meta['img_shape'] for meta in img_metas)
+        scale_factors = tuple(meta['scale_factor'] for meta in img_metas)
+
+        cls_score = lbox_results['cls_score']
+        lbox_pred = line_bboxes_list
+        
+        num_lbboxes_per_img = tuple(len(b) for b in line_bboxes_list)
+
+        rois = rois.split(num_lbboxes_per_img, 0)
+        cls_score = cls_score.split(num_lbboxes_per_img, 0)
+
+        det_labels = []
+        det_lboxes = []
+        for i in range(len(line_bboxes_list)):
+            if rois[i].shape[0] == 0:
+                # There is no line bbox in the single image
+                pass
+            else:
+                det_lbox, det_label = self.lbox_head.get_line_labels(
+                    cls_score[i],
+                    lbox_pred[i],
+                    img_shapes[i],
+                    scale_factors[i],
+                    rescale=rescale,
+                    cfg=cls_line_cfg
+                )
+                det_labels.append(det_label)
+                det_lboxes.append(det_lbox)
+
+        return det_lboxes, det_labels
 
 class BBoxTestMixin:
 

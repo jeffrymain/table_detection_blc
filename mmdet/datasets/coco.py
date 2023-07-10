@@ -504,15 +504,15 @@ class CocoDataset(CustomDataset):
             # }
             coco_metric_names = {
                 'mAP': 0,
-                'mAP_75': 1,
-                'mAP_80': 2,
-                'mAP_85': 3,
+                'mAP_60': 1,
+                'mAP_70': 2,
+                'mAP_80': 3,
                 'mAP_90': 4,
                 'mAP_95': 5,
                 'mAR': 6,
-                'mAR_75': 7,
-                'mAR_80': 8,
-                'mAR_85': 9,
+                'mAR_60': 7,
+                'mAR_70': 8,
+                'mAR_80': 9,
                 'mAR_90': 10,
                 'mAR_95': 11
             }
@@ -593,8 +593,8 @@ class CocoDataset(CustomDataset):
                     #     'mAP', 'mAP_50', 'mAP_75', 'mAP_s', 'mAP_m', 'mAP_l'
                     # ]
                     metric_items = [
-                        'mAP', 'mAP_75', 'mAP_80', 'mAP_85', 'mAP_90', 'mAP_95',
-                        'mAR', 'mAR_75', 'mAR_80', 'mAR_85', 'mAR_90', 'mAR_95'
+                        'mAP', 'mAP_60', 'mAP_70', 'mAP_80', 'mAP_90', 'mAP_95',
+                        'mAR', 'mAR_60', 'mAR_70', 'mAR_80', 'mAR_90', 'mAR_95'
                     ]
                 for metric_item in metric_items:
                     key = f'{metric}_{metric_item}'

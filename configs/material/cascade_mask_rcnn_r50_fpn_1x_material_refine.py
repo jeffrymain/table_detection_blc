@@ -1,6 +1,3 @@
-from tkinter.tix import Tree
-
-
 _base_ = '../cascade_rcnn/cascade_mask_rcnn_r50_fpn_1x_coco.py'
 
 custom_imports=dict(
@@ -81,33 +78,62 @@ model = dict(
             conv_out_channels=256,
             num_classes=1,
             loss_mask=dict(
-                type='CrossEntropyLoss', use_mask=True, loss_weight=1.0))
+                type='CrossEntropyLoss', use_mask=True, loss_weight=1.0)),
+        lbox_roi_extractor=dict(
+            type='SingleRoIExtractor',
+            roi_layer=dict(
+                type='RoIAlign',
+                output_size=7,
+                sampling_ratio=0
+            ),
+            out_channels=256,
+            featmap_strides=[4, 8, 16, 32]
+        ),
+        lbox_head=dict(
+            type='ClassifyHead',
+            in_channels=256,
+            fc_out_channels=1024,
+            roi_feat_size=7,
+            num_classes=1,
+            loss_cls=dict(
+                type='CrossEntropyLoss',
+                use_sigmoid=False, 
+                loss_weight=1.0
+            ),
+        )
     ),
 
     test_cfg = dict(
         rcnn = dict(
             use_refine = True,
+            cls_line_cfg = dict(
+                pos_thr = 0.8,  # 目前还没用到这个阈值
+            )
         )
     )
 )
 
 # 修改数据集相关设置
-dataset_type = 'CocoDataset'
+dataset_type = 'MaterialDataset'
 classes = ('table',)
 data = dict(
     train=dict(
-        img_prefix='data/material_papers/img',
+        type=dataset_type,
+        img_prefix='data/material_papers_e/img',
         classes=classes,
-        ann_file='data/material_papers/ann/train.json'),
+        ann_file='data/material_papers_e/ann/coco_formate_ann/train.json'),
     val=dict(
-        img_prefix='data/material_papers/img',
+        type=dataset_type,
+        img_prefix='data/material_papers_e/img',
         classes=classes,
-        ann_file='data/material_papers/ann/val.json'),
+        ann_file='data/material_papers_e/ann/coco_formate_ann/val.json'),
     test=dict(
-        img_prefix='data/material_papers/img',
+        type=dataset_type,
+        img_prefix='data/material_papers_e/img',
         classes=classes,
-        ann_file='data/material_papers/ann/test.json')
+        ann_file='data/material_papers_e/ann/coco_formate_ann/test.json')
 )
+evaluation = dict(metric=['bbox'])
 
 # 我们可以使用预训练的 Mask R-CNN 来获取更好的性能
 load_from = 'checkpoints/cascade_mask_rcnn_r50_fpn_1x_coco_20200203-9d4dcb24.pth'

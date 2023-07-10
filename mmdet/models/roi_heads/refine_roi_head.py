@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+# 弃用，目前使用 refine_standard_roi_head.py
 from tkinter import N
 from mmdet.core import bbox2result
 from mmdet.models.builder import HEADS

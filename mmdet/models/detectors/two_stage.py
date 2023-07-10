@@ -126,6 +126,9 @@ class TwoStageDetector(BaseDetector):
         """
         x = self.extract_feat(img)
 
+        if torch.isnan(x[0]).any():
+            c = 0
+
         losses = dict()
 
         # RPN forward and loss

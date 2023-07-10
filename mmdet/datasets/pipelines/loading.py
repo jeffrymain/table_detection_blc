@@ -89,46 +89,6 @@ class LoadImageFromFile:
         return repr_str
 
 
-import cv2
-@PIPELINES.register_module()
-class LoadLines:
-    """利用霍夫变换载入图片中的直线
-    
-    """
-    def __init__(self, maxLineGap=3):
-        self.maxLineGap = maxLineGap
-        pass
-
-    def __call__(self, results):
-        img = results['img']
-        height = results['img_shape'][0]
-        width = results['img_shape'][1]
-        houghimg = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        houghimg = cv2.GaussianBlur(houghimg,(3,3),0)
-        edges = cv2.Canny(houghimg, 50, 150, apertureSize = 3)
-        lines = cv2.HoughLinesP(edges,1,np.pi/180,int(width/4),minLineLength=int(width/4),maxLineGap=self.maxLineGap)
-        #############################################################################################
-        # houghimg = np.zeros((height, width,3), np.uint8)
-        # houghimg.fill(255)
-        # houghimg = cv2.cvtColor(houghimg, cv2.COLOR_RGB2BGR)
-
-        
-        # if lines is not None:
-        #     for line in lines:
-        #         for x1,y1,x2,y2 in line:
-        #             cv2.line(img,(x1,y1),(x2,y2),(0,255,0),2)
-        # cv2.imshow(f'idx=,img_index=', img)
-        # cv2.waitKey()
-        #################################################################################################
-        if lines is not None:
-            lines = np.squeeze(lines, axis=1)
-            lines = torch.as_tensor(lines, dtype=torch.float32)
-        else:
-            lines = None
-        results['lines'] = lines
-        return results
-
-
 @PIPELINES.register_module()
 class LoadImageFromWebcam(LoadImageFromFile):
     """Load an image from webcam.

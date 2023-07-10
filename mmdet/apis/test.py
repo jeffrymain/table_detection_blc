@@ -7,6 +7,8 @@ import time
 
 import mmcv
 import torch
+import json
+import numpy as np
 import torch.distributed as dist
 from mmcv.image import tensor2imgs
 from mmcv.runner import get_dist_info
@@ -77,6 +79,99 @@ def single_gpu_test(model,
             prog_bar.update()
     return results
 
+def my_single_gpu_test(
+    model,
+    data_loader,
+    show=False,
+    out_dir=None,
+    show_score_thr=0.3
+):
+    model.eval()
+    results = []
+    line_results = []
+    dataset = data_loader.dataset
+    PALETTE = getattr(dataset, 'PALETTE', None)
+    prog_bar = mmcv.ProgressBar(len(dataset))
+    for i, data in enumerate(data_loader):
+        with torch.no_grad():
+            result = model(return_loss=False, rescale=True, **data)
+
+        batch_size = len(result)
+        if show or out_dir:
+            if batch_size == 1 and isinstance(data['img'][0], torch.Tensor):
+                img_tensor = data['img'][0]
+            else:
+                img_tensor = data['img'][0].data[0]
+            img_metas = data['img_metas'][0].data[0]
+            imgs = tensor2imgs(img_tensor, **img_metas[0]['img_norm_cfg'])
+            assert len(imgs) == len(img_metas)
+
+            for i, (img, img_meta) in enumerate(zip(imgs, img_metas)):
+                h, w, _ = img_meta['img_shape']
+                img_show = img[:h, :w, :]
+
+                ori_h, ori_w = img_meta['ori_shape'][:-1]
+                img_show = mmcv.imresize(img_show, (ori_w, ori_h))
+
+                if out_dir:
+                    out_file = osp.join(out_dir, img_meta['ori_filename'])
+                else:
+                    out_file = None
+
+                model.module.show_result(
+                    img_show,
+                    result[i],
+                    bbox_color=PALETTE,
+                    text_color=PALETTE,
+                    mask_color=PALETTE,
+                    show=show,
+                    out_file=out_file,
+                    score_thr=show_score_thr)
+
+        # encode mask results
+        if isinstance(result[0], tuple):
+            temp_result = []
+            if len(result[0]) == 3:
+                for bbox_results, mask_results, lbox_results in result:
+                    temp_result.append((bbox_results, encode_mask_results(mask_results)))
+                    line_results.extend((lbox_results,))
+            elif len(result[0]) == 2:
+                for bbox_results, lbox_results in result:
+                    temp_result.append(bbox_results)
+                    line_results.extend((lbox_results,))
+            # result = [(bbox_results, encode_mask_results(mask_results))
+            #           for bbox_results, mask_results in result]
+        # This logic is only used in panoptic segmentation test.
+        elif isinstance(result[0], dict) and 'ins_results' in result[0]:
+            for j in range(len(result)):
+                bbox_results, mask_results = result[j]['ins_results']
+                result[j]['ins_results'] = (bbox_results,
+                                            encode_mask_results(mask_results))
+                
+        # 从文件载入ocr结果
+        ocr_result_json = r"./ocrtools/baidu/icdar2019_results.json"
+        with open(ocr_result_json) as f:
+            ocr_result = json.load(f)
+        # 直接从json导入ocr结果
+        bbox_result = []
+        for res in ocr_result['annotations']:
+            if res['file_name'] == data['img_metas'][0].data[0][0]['ori_filename']:#假设batch=1
+                bbox_result.append(res['bbox']+[0.99])
+        if len(bbox_result) != 0:
+            bbox_result = np.asarray(bbox_result)
+        else:
+            bbox_result.append([1,1,4,4,0.5])
+            bbox_result = np.asarray(bbox_result)
+        temp_result = [[bbox_result]]
+
+
+
+        results.extend(temp_result)
+
+        for _ in range(batch_size):
+            prog_bar.update()
+    return results, line_results
+                        
 
 def multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
     """Test model with multiple gpus.

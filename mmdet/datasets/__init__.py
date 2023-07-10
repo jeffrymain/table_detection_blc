@@ -16,6 +16,11 @@ from .voc import VOCDataset
 from .wider_face import WIDERFaceDataset
 from .xml_style import XMLDataset
 
+from .material import MaterialDataset
+from .icdar_2019 import ICDAR_2019Dataset
+from .icdar_2017 import ICDAR_2017Dataset
+from .icdar_2017_str import ICDAR_2017_STR_Dataset
+
 __all__ = [
     'CustomDataset', 'XMLDataset', 'CocoDataset', 'DeepFashionDataset',
     'VOCDataset', 'CityscapesDataset', 'LVISDataset', 'LVISV05Dataset',
@@ -24,5 +29,7 @@ __all__ = [
     'ClassBalancedDataset', 'WIDERFaceDataset', 'DATASETS', 'PIPELINES',
     'build_dataset', 'replace_ImageToTensor', 'get_loading_pipeline',
     'NumClassCheckHook', 'CocoPanopticDataset', 'MultiImageMixDataset',
-    'OpenImagesDataset', 'OpenImagesChallengeDataset'
+    'OpenImagesDataset', 'OpenImagesChallengeDataset',
+    
+    'MaterialDataset', 'ICDAR_2019Dataset', 'ICDAR_2017Dataset', 'ICDAR_2017_STR_Dataset'
 ]

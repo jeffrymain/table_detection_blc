@@ -1,7 +1,7 @@
 optimizer = dict(  # 用于构建优化器的配置文件。支持 PyTorch 中的所有优化器，同时它们的参数与 PyTorch 里的优化器参数一致。
     type='SGD',  # 优化器种类，更多细节可参考 https://github.com/open-mmlab/mmdetection/blob/master/mmdet/core/optimizer/default_constructor.py#L13。
-    lr=0.02,  # 优化器的学习率，参数的使用细节请参照对应的 PyTorch 文档。
-    momentum=0.9,  # 动量(Momentum)
+    lr=0.00125,  # 优化器的学习率，参数的使用细节请参照对应的 PyTorch 文档。原来0.02 按照比率lr=0.01 for 4 GPUs * 2 img/gpu
+    momentum=0.1,  # 动量(Momentum) 原来0.9
     weight_decay=0.0001)  # SGD 的衰减权重(weight decay)。
 optimizer_config = dict(  # optimizer hook 的配置文件，执行细节请参考 https://github.com/open-mmlab/mmcv/blob/master/mmcv/runner/hooks/optimizer.py#L8。
     grad_clip=None)  # 大多数方法不使用梯度限制(grad_clip)。

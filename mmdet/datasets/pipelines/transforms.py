@@ -323,60 +323,6 @@ class Resize:
 
 
 @PIPELINES.register_module()
-class NewResize(Resize):
-    def _resize_lines(self, results):
-        """Resize lines with ``results['scale_factor']``."""
-        lines = results.get('lines')
-        if lines is not None:
-            lines = lines * results['scale_factor']
-
-            if self.bbox_clip_border:
-                img_shape = results['img_shape']
-                lines[:, 0::2] = np.clip(lines[:, 0::2], 0, img_shape[1])
-                lines[:, 1::2] = np.clip(lines[:, 1::2], 0, img_shape[0])
-
-        results['lines'] = lines
-
-    def __call__(self, results):
-        """Call function to resize images, bounding boxes, masks, semantic
-        segmentation map.
-
-        Args:
-            results (dict): Result dict from loading pipeline.
-
-        Returns:
-            dict: Resized results, 'img_shape', 'pad_shape', 'scale_factor', \
-                'keep_ratio' keys are added into result dict.
-        """
-
-        if 'scale' not in results:
-            if 'scale_factor' in results:
-                img_shape = results['img'].shape[:2]
-                scale_factor = results['scale_factor']
-                assert isinstance(scale_factor, float)
-                results['scale'] = tuple(
-                    [int(x * scale_factor) for x in img_shape][::-1])
-            else:
-                self._random_scale(results)
-        else:
-            if not self.override:
-                assert 'scale_factor' not in results, (
-                    'scale and scale_factor cannot be both set.')
-            else:
-                results.pop('scale')
-                if 'scale_factor' in results:
-                    results.pop('scale_factor')
-                self._random_scale(results)
-
-        self._resize_img(results)
-        self._resize_bboxes(results)
-        self._resize_masks(results)
-        self._resize_seg(results)
-        # self._resize_lines(results)
-        return results
-
-
-@PIPELINES.register_module()
 class RandomFlip:
     """Flip the image & bbox & mask.
 
